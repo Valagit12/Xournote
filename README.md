@@ -23,7 +23,3 @@ Coming soon...
 ## Contributing
 
 Contributions welcome! Please open issues or submit pull requests for new features, bug fixes, or improvements.
-
-## License
-
-[MIT](./LICENSE)
