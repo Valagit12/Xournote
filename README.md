@@ -16,10 +16,3 @@ A modern, web-based alternative to Xournal++, designed for universal compatibili
 - **Backend:** Node.js / Express or serverless (TBD)  
 - **Storage:** AWS (TBD)
 
-## Demo
-
-Coming soon...
-
-## Contributing
-
-Contributions welcome! Please open issues or submit pull requests for new features, bug fixes, or improvements.
