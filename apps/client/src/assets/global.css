@@ -1,0 +1,32 @@
+:root {
+  --bg: #0b1224;
+  --panel: #0f172a;
+  --muted: #94a3b8;
+  --accent: #0ea5e9;
+  --border: #1e293b;
+  --text: #e2e8f0;
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  --radius: 14px;
+  --font: "Sora", "Segoe UI", "Inter", system-ui, -apple-system, sans-serif;
+  --page: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  line-height: 1.5;
+}
+
+textarea,
+button,
+input {
+  font-family: inherit;
+}

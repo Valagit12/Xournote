@@ -1,0 +1,1 @@
+Functions inside the js files in this utils function should be pure functions
