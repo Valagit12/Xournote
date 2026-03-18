@@ -1,4 +1,7 @@
-export const WS_URL = process.env.REACT_APP_WS_URL || 'ws://localhost:8080';
+export const WS_URL = process.env.REACT_APP_WS_URL
+  || (typeof window !== 'undefined' && window.location.hostname !== 'localhost'
+    ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
+    : 'ws://localhost:8080');
 
 export const TEXT_UPDATE_DEBOUNCE_MS = 250;
 

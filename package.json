@@ -8,8 +8,10 @@
     "packages/*"
   ],
   "scripts": {
-    "client": "npm run start --workspace apps/client",
-    "server": "npm run start --workspace apps/server",
+    "dev:client": "npm run start --workspace apps/client",
+    "dev:server": "npm run start --workspace apps/server",
+    "build": "npm run build --workspace apps/client",
+    "start": "npm run start --workspace apps/server",
     "test": "npm run test --workspaces --if-present"
   },
   "repository": {

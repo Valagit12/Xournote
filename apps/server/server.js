@@ -1,25 +1,25 @@
 import express from 'express';
-import * as http from 'http'; // upgrade to https later
+import * as http from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
-import cors from 'cors';
+
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { generateId, parseIncomingMessage, parseOutgoingMessage } from 'xournote-shared';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
-    : null;
-
-app.use(
-    cors({
-        origin: allowedOrigins || '*',
-    })
-);
+const clientBuildPath = process.env.CLIENT_BUILD_PATH
+    || path.join(__dirname, '..', 'client', 'build');
+app.use(express.static(clientBuildPath));
+app.use((req, res) => res.sendFile(path.join(clientBuildPath, 'index.html')));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const MAX_MESSAGE_SIZE = 200_000; 
+const MAX_MESSAGE_SIZE = 200_000;
 const state = {
     pages: [
         {
@@ -50,12 +50,6 @@ const broadcast = (payload) => {
 };
 
 wss.on('connection', (ws, req) => {
-    const origin = req.headers.origin;
-    if (allowedOrigins && origin && !allowedOrigins.includes(origin)) {
-        ws.close(1008, 'Origin not allowed');
-        return;
-    }
-
     ws.isAlive = true;
     ws.on('pong', () => {
         ws.isAlive = true;
@@ -140,7 +134,6 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-// simple heartbeat
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) {
@@ -156,7 +149,7 @@ wss.on('close', () => {
     clearInterval(interval);
 });
 
-const PORT = 8080;
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
     console.log(`Server is listening on port ${PORT}`);
 });
