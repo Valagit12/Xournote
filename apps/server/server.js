@@ -9,6 +9,12 @@ import { generateId, parseIncomingMessage, parseOutgoingMessage } from 'xournote
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const MAX_MESSAGE_SIZE = 200_000;
+const MAX_NOTEBOOKS = 10;
+const IDLE_TTL_MS = 24 * 60 * 60 * 1000;
+const EMPTY_TTL_MS = 60 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+
 const app = express();
 
 const clientBuildPath = process.env.CLIENT_BUILD_PATH
@@ -19,23 +25,35 @@ app.use((req, res) => res.sendFile(path.join(clientBuildPath, 'index.html')));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const MAX_MESSAGE_SIZE = 200_000;
-const state = {
-    pages: [
-        {
-            id: generateId('page'),
-            text: '',
-            strokes: [],
-        },
-    ],
+const notebooks = new Map();
+let nextNotebookId = 1;
+
+const createNotebook = () => {
+    const id = nextNotebookId++;
+    const notebook = {
+        id,
+        pages: [{ id: generateId('page'), text: '', strokes: [] }],
+        createdAt: Date.now(),
+        lastEditedAt: Date.now(),
+    };
+    notebooks.set(id, notebook);
+    return notebook;
 };
 
-const getPage = (pageId) => {
-    if (!pageId) return state.pages[0];
-    return state.pages.find((p) => p.id === pageId) || state.pages[0];
+const getPage = (notebook, pageId) => {
+    if (!pageId) return notebook.pages[0];
+    return notebook.pages.find((p) => p.id === pageId) || notebook.pages[0];
 };
 
-const broadcast = (payload) => {
+const sendTo = (ws, payload) => {
+    if (ws.readyState !== WebSocket.OPEN) {
+        console.warn('sendTo: socket not open, dropping message', payload.type);
+        return;
+    }
+    ws.send(JSON.stringify(payload));
+};
+
+const broadcast = (notebookId, payload) => {
     const parsed = parseOutgoingMessage(payload);
     if (!parsed.success) {
         console.warn('Dropping outbound broadcast: invalid shape', parsed.error.format());
@@ -43,7 +61,7 @@ const broadcast = (payload) => {
     }
     const data = JSON.stringify(parsed.data);
     wss.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === WebSocket.OPEN && client.notebookId === notebookId) {
             client.send(data);
         }
     });
@@ -51,25 +69,42 @@ const broadcast = (payload) => {
 
 wss.on('connection', (ws, req) => {
     ws.isAlive = true;
-    ws.on('pong', () => {
-        ws.isAlive = true;
-    });
+    ws.on('pong', () => { ws.isAlive = true; });
 
-    console.log('New client connected');
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const notebookParam = url.searchParams.get('notebook');
+    const requestedId = notebookParam ? Number(notebookParam) : null;
 
-    const initPayload = { type: 'init', data: state };
-    const parsedInit = parseOutgoingMessage(initPayload);
-    if (parsedInit.success) {
-        ws.send(JSON.stringify(parsedInit.data));
+    if (requestedId && notebooks.has(requestedId)) {
+        ws.notebookId = requestedId;
+        const notebook = notebooks.get(requestedId);
+        sendTo(ws, { type: 'init', data: { pages: notebook.pages } });
+    } else if (requestedId) {
+        sendTo(ws, { type: 'notebook:status', status: 'not_found' });
+        ws.close();
+        return;
+    } else if (notebooks.size >= MAX_NOTEBOOKS) {
+        sendTo(ws, { type: 'notebook:status', status: 'limit_reached' });
+        ws.close();
+        return;
     } else {
-        console.warn('Init payload failed validation', parsedInit.error.format());
+        const notebook = createNotebook();
+        ws.notebookId = notebook.id;
+        sendTo(ws, { type: 'notebook:status', status: 'created', data: { id: notebook.id } });
+        sendTo(ws, { type: 'init', data: { pages: notebook.pages } });
     }
+
+    console.log(`Client connected to notebook ${ws.notebookId}`);
 
     ws.on('message', (message) => {
         if (message.length > MAX_MESSAGE_SIZE) {
             console.warn('Message dropped: exceeds max size');
             return;
         }
+
+        const notebook = notebooks.get(ws.notebookId);
+        if (!notebook) return;
+
         try {
             const parsedRaw = JSON.parse(message.toString());
             const safe = parseIncomingMessage(parsedRaw);
@@ -79,46 +114,48 @@ wss.on('connection', (ws, req) => {
             }
             const parsed = safe.data;
 
+            notebook.lastEditedAt = Date.now();
+
             switch (parsed.type) {
                 case 'page:add': {
                     const newPage =
                         parsed.data && parsed.data.id
                             ? parsed.data
                             : { id: generateId('page'), text: '', strokes: [] };
-                    state.pages.push({ id: newPage.id, text: newPage.text || '', strokes: newPage.strokes || [] });
-                    broadcast({ type: 'page:add', data: newPage });
+                    notebook.pages.push({ id: newPage.id, text: newPage.text || '', strokes: newPage.strokes || [] });
+                    broadcast(ws.notebookId, { type: 'page:add', data: newPage });
                     break;
                 }
                 case 'text:update':
                 case 'update': {
-                    const page = getPage(parsed.pageId);
+                    const page = getPage(notebook, parsed.pageId);
                     if (!page) break;
                     page.text = parsed.data;
-                    broadcast({ type: 'text:update', pageId: page.id, data: page.text });
-                    broadcast({ type: 'update', pageId: page.id, data: page.text });
+                    broadcast(ws.notebookId, { type: 'text:update', pageId: page.id, data: page.text });
+                    broadcast(ws.notebookId, { type: 'update', pageId: page.id, data: page.text });
                     break;
                 }
                 case 'stroke:add': {
-                    const page = getPage(parsed.pageId);
+                    const page = getPage(notebook, parsed.pageId);
                     if (!page) break;
                     page.strokes.push(parsed.data);
-                    broadcast({ type: 'stroke:add', pageId: page.id, data: parsed.data });
+                    broadcast(ws.notebookId, { type: 'stroke:add', pageId: page.id, data: parsed.data });
                     break;
                 }
                 case 'stroke:remove': {
-                    const page = getPage(parsed.pageId);
+                    const page = getPage(notebook, parsed.pageId);
                     if (!page) break;
                     const strokeId = parsed.strokeId || (parsed.data && parsed.data.id);
                     if (!strokeId) break;
                     page.strokes = page.strokes.filter((s) => s.id !== strokeId);
-                    broadcast({ type: 'stroke:remove', pageId: page.id, strokeId, data: { id: strokeId } });
+                    broadcast(ws.notebookId, { type: 'stroke:remove', pageId: page.id, strokeId, data: { id: strokeId } });
                     break;
                 }
                 case 'canvas:clear': {
-                    const page = getPage(parsed.pageId);
+                    const page = getPage(notebook, parsed.pageId);
                     if (!page) break;
                     page.strokes = [];
-                    broadcast({ type: 'canvas:clear', pageId: page.id });
+                    broadcast(ws.notebookId, { type: 'canvas:clear', pageId: page.id });
                     break;
                 }
                 default:
@@ -130,11 +167,11 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('close', () => {
-        console.log('Client disconnected');
+        console.log(`Client disconnected from notebook ${ws.notebookId}`);
     });
 });
 
-const interval = setInterval(() => {
+const heartbeatInterval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) {
             ws.terminate();
@@ -145,8 +182,28 @@ const interval = setInterval(() => {
     });
 }, 30000);
 
+const cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [id, notebook] of notebooks) {
+        const idleTooLong = now - notebook.lastEditedAt > IDLE_TTL_MS;
+        const emptyTooLong = notebook.pages.every((p) => !p.text && p.strokes.length === 0)
+            && now - notebook.createdAt > EMPTY_TTL_MS;
+
+        if (idleTooLong || emptyTooLong) {
+            wss.clients.forEach((client) => {
+                if (client.notebookId === id && client.readyState === WebSocket.OPEN) {
+                    client.close();
+                }
+            });
+            notebooks.delete(id);
+            console.log(`Notebook ${id} cleaned up (${idleTooLong ? 'idle' : 'empty'})`);
+        }
+    }
+}, CLEANUP_INTERVAL_MS);
+
 wss.on('close', () => {
-    clearInterval(interval);
+    clearInterval(heartbeatInterval);
+    clearInterval(cleanupInterval);
 });
 
 const PORT = process.env.PORT || 8080;

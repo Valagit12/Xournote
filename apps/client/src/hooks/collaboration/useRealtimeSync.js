@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { WS_URL, CONNECTIONSTATUS } from '../../data/constants';
+import { WS_BASE_URL, CONNECTIONSTATUS } from '../../data/constants';
 import { createPage } from '../../utils/page';
 import { generateId, parseIncomingMessage, parseOutgoingMessage } from 'xournote-shared';
 
 const getActivePageId = (pageIdFromMessage, fallbackRef) => pageIdFromMessage ?? fallbackRef?.current;
 
 const useRealtimeSync = ({
+  notebookId,
   onInit,
   onPageAdd,
   onTextUpdate,
   onStrokeAdd,
   onStrokeRemove,
   onCanvasClear,
+  onNotebookCreated,
+  onNotebookNotFound,
+  onNotebookLimitReached,
   currentPageIdRef,
 } = {}) => {
   const [connectionStatus, setConnectionStatus] = useState(CONNECTIONSTATUS.CONNECTING);
@@ -19,11 +23,18 @@ const useRealtimeSync = ({
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef(null);
   const shouldReconnectRef = useRef(true);
-  const handlersRef = useRef({ onInit, onPageAdd, onTextUpdate, onStrokeAdd, onStrokeRemove, onCanvasClear });
+  const handlersRef = useRef({
+    onInit, onPageAdd, onTextUpdate, onStrokeAdd, onStrokeRemove, onCanvasClear,
+    onNotebookCreated, onNotebookNotFound, onNotebookLimitReached,
+  });
 
   useEffect(() => {
-    handlersRef.current = { onInit, onPageAdd, onTextUpdate, onStrokeAdd, onStrokeRemove, onCanvasClear };
-  }, [onInit, onPageAdd, onTextUpdate, onStrokeAdd, onStrokeRemove, onCanvasClear]);
+    handlersRef.current = {
+      onInit, onPageAdd, onTextUpdate, onStrokeAdd, onStrokeRemove, onCanvasClear,
+      onNotebookCreated, onNotebookNotFound, onNotebookLimitReached,
+    };
+  }, [onInit, onPageAdd, onTextUpdate, onStrokeAdd, onStrokeRemove, onCanvasClear,
+      onNotebookCreated, onNotebookNotFound, onNotebookLimitReached]);
 
   const sendMessage = useCallback((payload) => {
     const ws = wsRef.current;
@@ -53,10 +64,14 @@ const useRealtimeSync = ({
       }
     };
 
+    const wsUrlRef = { current: notebookId
+      ? `${WS_BASE_URL}?notebook=${notebookId}`
+      : WS_BASE_URL };
+
     const setupWebSocket = () => {
       if (!shouldReconnectRef.current) return;
       setConnectionStatus(CONNECTIONSTATUS.CONNECTING);
-      const ws = new WebSocket(WS_URL);
+      const ws = new WebSocket(wsUrlRef.current);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -93,37 +108,50 @@ const useRealtimeSync = ({
           }
           const message = parsed.data;
           const activePageId = getActivePageId(message.pageId, currentPageIdRef);
-          const { onInit: handleInit, onPageAdd: handlePageAdd, onTextUpdate: handleTextUpdate, onStrokeAdd: handleStrokeAdd, onStrokeRemove: handleStrokeRemove, onCanvasClear: handleCanvasClear } = handlersRef.current;
+          const handlers = handlersRef.current;
 
           switch (message.type) {
+            case 'notebook:status': {
+              if (message.status === 'created') {
+                wsUrlRef.current = `${WS_BASE_URL}?notebook=${message.data.id}`;
+                handlers.onNotebookCreated?.(message.data.id);
+              } else if (message.status === 'not_found') {
+                shouldReconnectRef.current = false;
+                handlers.onNotebookNotFound?.();
+              } else if (message.status === 'limit_reached') {
+                shouldReconnectRef.current = false;
+                handlers.onNotebookLimitReached?.();
+              }
+              break;
+            }
             case 'init': {
-              handleInit?.(message.data);
+              handlers.onInit?.(message.data);
               break;
             }
             case 'page:add': {
               const page = message.data && message.data.id ? message.data : createPage(generateId('page'));
-              handlePageAdd?.(page);
+              handlers.onPageAdd?.(page);
               break;
             }
             case 'text:update':
             case 'update': {
               if (typeof message.data !== 'string') break;
-              handleTextUpdate?.(activePageId, message.data);
+              handlers.onTextUpdate?.(activePageId, message.data);
               break;
             }
             case 'stroke:add': {
               if (!message.data) break;
-              handleStrokeAdd?.(activePageId, message.data);
+              handlers.onStrokeAdd?.(activePageId, message.data);
               break;
             }
             case 'stroke:remove': {
               const strokeId = message.strokeId || (message.data && message.data.id);
               if (!strokeId) break;
-              handleStrokeRemove?.(activePageId, strokeId);
+              handlers.onStrokeRemove?.(activePageId, strokeId);
               break;
             }
             case 'canvas:clear': {
-              handleCanvasClear?.(activePageId);
+              handlers.onCanvasClear?.(activePageId);
               break;
             }
             default:
@@ -139,7 +167,7 @@ const useRealtimeSync = ({
 
     setupWebSocket();
     return cleanup;
-  }, [currentPageIdRef]);
+  }, [notebookId, currentPageIdRef]);
 
   return { connectionStatus, sendMessage };
 };

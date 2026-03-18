@@ -1,7 +1,9 @@
-export const WS_URL = process.env.REACT_APP_WS_URL
+export const WS_BASE_URL = process.env.REACT_APP_WS_URL
   || (typeof window !== 'undefined' && window.location.hostname !== 'localhost'
     ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
     : 'ws://localhost:8080');
+
+export const MAX_NOTEBOOKS = 10;
 
 export const TEXT_UPDATE_DEBOUNCE_MS = 250;
 

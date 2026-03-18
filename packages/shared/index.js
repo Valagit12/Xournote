@@ -28,6 +28,8 @@ const initDataSchema = z.union([
   }),
 ]);
 
+const notebookStatusEnum = z.enum(['created', 'not_found', 'limit_reached']);
+
 const messageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('init'), data: initDataSchema }),
   z.object({ type: z.literal('page:add'), data: pageSchema.optional() }),
@@ -41,6 +43,11 @@ const messageSchema = z.discriminatedUnion('type', [
     data: z.object({ id: z.string() }).optional(),
   }),
   z.object({ type: z.literal('canvas:clear'), pageId: z.string().optional() }),
+  z.object({
+    type: z.literal('notebook:status'),
+    status: notebookStatusEnum,
+    data: z.object({ id: z.number() }).optional(),
+  }),
 ]);
 
 const outboundMessageSchema = messageSchema;
