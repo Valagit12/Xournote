@@ -30,7 +30,6 @@ const NotebookPage = () => {
     setActivePage,
     setPageText,
     appendStroke,
-    replaceLatestStroke,
     removeStroke,
     clearPageStrokes,
     addPage,
@@ -100,6 +99,7 @@ const NotebookPage = () => {
     handlePointerMove,
     handlePointerUp,
     handlePointerLeave,
+    handlePointerCancel,
     clearCanvas,
   } = useCanvasDrawing({
     tool,
@@ -113,7 +113,6 @@ const NotebookPage = () => {
     isDrawingRef,
     ensureStrokeSet,
     appendStroke,
-    replaceLatestStroke,
     removeStroke,
     clearPageStrokes,
     sendMessage,
@@ -174,6 +173,10 @@ const NotebookPage = () => {
     ctx.clearRect(0, 0, width, height);
     const rect = { width, height };
     strokes.forEach((stroke) => drawStroke(ctx, stroke, rect));
+
+    if (isDrawingRef.current && currentStrokeRef.current?.points?.length) {
+      drawStroke(ctx, currentStrokeRef.current, rect);
+    }
   }, [strokes]);
 
   const handleAddPage = useCallback(() => {
@@ -234,6 +237,7 @@ const NotebookPage = () => {
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerLeave={handlePointerLeave}
+          onPointerCancel={handlePointerCancel}
         />
       </main>
     </div>

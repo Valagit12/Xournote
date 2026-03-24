@@ -10,6 +10,7 @@ const PageSurface = ({
   onPointerMove,
   onPointerUp,
   onPointerLeave,
+  onPointerCancel,
 }) => (
   <div className="page-shell">
     <div className="page">
@@ -28,8 +29,12 @@ const PageSurface = ({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerLeave={onPointerLeave}
+          onPointerCancel={onPointerCancel}
           onContextMenu={(event) => event.preventDefault()}
-          style={{ pointerEvents: tool === PENTOOL.OFF ? 'none' : 'auto' }}
+          style={{
+            pointerEvents: tool === PENTOOL.OFF ? 'none' : 'auto',
+            touchAction: tool === PENTOOL.OFF ? 'auto' : 'pinch-zoom',
+          }}
         >
           <canvas ref={canvasRef} />
         </div>

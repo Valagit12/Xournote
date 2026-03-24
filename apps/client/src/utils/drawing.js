@@ -8,6 +8,16 @@ export const toCanvasPoint = (point, rect) => ({
 export const drawStroke = (ctx, stroke, rect) => {
   if (!stroke || !Array.isArray(stroke.points) || stroke.points.length === 0) return;
   const { color = DEFAULT_INK_COLOR, width = DEFAULT_INK_WIDTH } = stroke;
+
+  if (stroke.points.length === 1) {
+    const point = toCanvasPoint(stroke.points[0], rect);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, Math.max(width / 2, 0.5), 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.lineJoin = 'round';

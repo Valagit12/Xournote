@@ -1,6 +1,7 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { generateId } from 'xournote-shared';
 import { PENTOOL } from '../../data/constants';
+import { drawStroke, toCanvasPoint } from '../../utils/drawing';
 
 const useCanvasDrawing = ({
   tool,
@@ -14,35 +15,210 @@ const useCanvasDrawing = ({
   isDrawingRef,
   ensureStrokeSet,
   appendStroke,
-  replaceLatestStroke,
   removeStroke,
   clearPageStrokes,
   sendMessage,
 } = {}) => {
-  // This hook owns the pointer-to-stroke pipeline: normalize pointer coordinates,
-  // update local state, and broadcast changes to collaborators. It is deliberately
-  // UI-agnostic so NotebookPage can focus on layout and wiring.
+  const queuedPointsRef = useRef([]);
+  const lastRenderedPointRef = useRef(null);
+  const activeStrokeRectRef = useRef(null);
+  const activeDrawingPointerIdRef = useRef(null);
+  const activeDrawingPointerTypeRef = useRef(null);
+  const activeTouchPointersRef = useRef(new Set());
+  const isMultiTouchGestureRef = useRef(false);
+  const frameRef = useRef(null);
+
+  const isSecondaryTouchPointer = useCallback(
+    (event) => event.pointerType === 'touch' && event.isPrimary === false,
+    [],
+  );
+
+  const registerTouchPointerDown = useCallback((event) => {
+    if (event.pointerType !== 'touch') return false;
+    activeTouchPointersRef.current.add(event.pointerId);
+    if (activeTouchPointersRef.current.size > 1) {
+      isMultiTouchGestureRef.current = true;
+    }
+    return isMultiTouchGestureRef.current;
+  }, []);
+
+  const releaseTouchPointer = useCallback((event) => {
+    if (event.pointerType !== 'touch') return;
+    activeTouchPointersRef.current.delete(event.pointerId);
+    if (activeTouchPointersRef.current.size === 0) {
+      isMultiTouchGestureRef.current = false;
+    }
+  }, []);
+
+  const clearRenderQueue = useCallback(() => {
+    queuedPointsRef.current = [];
+    lastRenderedPointRef.current = null;
+    activeStrokeRectRef.current = null;
+  }, []);
 
   const getNormalizedPoint = useCallback(
-    (event) => {
-      // Convert pointer coordinates (client pixels) to normalized 0–1 space relative
-      // to the canvas bounds. 
-      const rect = canvasRef.current?.getBoundingClientRect();
-      if (!rect) return null;
+    (event, rectOverride) => {
+      const rect = rectOverride || activeStrokeRectRef.current || canvasRef.current?.getBoundingClientRect();
+      if (!rect || !rect.width || !rect.height) return null;
+      const x = (event.clientX - rect.left) / rect.width;
+      const y = (event.clientY - rect.top) / rect.height;
       return {
-        x: (event.clientX - rect.left) / rect.width,
-        y: (event.clientY - rect.top) / rect.height,
+        x: Math.max(0, Math.min(1, x)),
+        y: Math.max(0, Math.min(1, y)),
       };
     },
     [canvasRef],
   );
 
+  const flushQueuedStrokeSegments = useCallback(() => {
+    const stroke = currentStrokeRef.current;
+    const pendingPoints = queuedPointsRef.current;
+    if (!stroke || pendingPoints.length === 0) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext?.('2d');
+    const { width, height } = canvasSizeRef.current;
+    if (!ctx || !width || !height) return;
+
+    const rect = { width, height };
+    const fromPoint = lastRenderedPointRef.current || stroke.points[0];
+    if (!fromPoint) return;
+
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.width;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+
+    const start = toCanvasPoint(fromPoint, rect);
+    ctx.moveTo(start.x, start.y);
+
+    let drewSegment = false;
+    pendingPoints.forEach((point) => {
+      const next = toCanvasPoint(point, rect);
+      ctx.lineTo(next.x, next.y);
+      drewSegment = true;
+    });
+
+    if (!drewSegment) {
+      ctx.lineTo(start.x, start.y);
+    }
+
+    ctx.stroke();
+
+    lastRenderedPointRef.current = pendingPoints[pendingPoints.length - 1] || fromPoint;
+    queuedPointsRef.current = [];
+  }, [canvasRef, canvasSizeRef, currentStrokeRef]);
+
+  const scheduleQueuedStrokeRender = useCallback(() => {
+    if (frameRef.current !== null) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      flushQueuedStrokeSegments();
+    });
+  }, [flushQueuedStrokeSegments]);
+
+  const queuePointsFromEvent = useCallback(
+    (event, rectOverride) => {
+      const stroke = currentStrokeRef.current;
+      if (!stroke) return false;
+
+      const sampledEvents =
+        typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
+      let didQueue = false;
+
+      sampledEvents.forEach((sample) => {
+        const point = getNormalizedPoint(sample, rectOverride);
+        if (!point) return;
+
+        const lastPoint = stroke.points[stroke.points.length - 1];
+        if (lastPoint && point.x === lastPoint.x && point.y === lastPoint.y) {
+          return;
+        }
+
+        stroke.points.push(point);
+        queuedPointsRef.current.push(point);
+        didQueue = true;
+      });
+
+      if (didQueue) {
+        scheduleQueuedStrokeRender();
+      }
+
+      return didQueue;
+    },
+    [currentStrokeRef, getNormalizedPoint, scheduleQueuedStrokeRender],
+  );
+
+  useEffect(
+    () => () => {
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+      }
+    },
+    [],
+  );
+
+  const redrawCommittedStrokes = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext?.('2d');
+    const { width, height, dpr = 1 } = canvasSizeRef.current;
+    if (!ctx || !width || !height) return;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+    const rect = { width, height };
+    strokes.forEach((stroke) => drawStroke(ctx, stroke, rect));
+  }, [canvasRef, canvasSizeRef, strokes]);
+
+  const abortStroke = useCallback(
+    (event) => {
+      if (!isDrawingRef.current || !currentStrokeRef.current) return;
+
+      const activePointerId = activeDrawingPointerIdRef.current;
+
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+
+      isDrawingRef.current = false;
+      currentStrokeRef.current = null;
+      activeDrawingPointerIdRef.current = null;
+      activeDrawingPointerTypeRef.current = null;
+      clearRenderQueue();
+
+      const pointerIdToRelease = event?.pointerId ?? activePointerId;
+      if (canvasRef.current?.releasePointerCapture && pointerIdToRelease !== undefined && pointerIdToRelease !== null) {
+        try {
+          canvasRef.current.releasePointerCapture(pointerIdToRelease);
+        } catch (_) {
+          // ignore release errors
+        }
+      }
+
+      redrawCommittedStrokes();
+    },
+    [canvasRef, clearRenderQueue, currentStrokeRef, isDrawingRef, redrawCommittedStrokes],
+  );
+
   const startStroke = useCallback(
     (event) => {
       if (tool !== PENTOOL.DRAWING) return;
-      const point = getNormalizedPoint(event);
+      if (isSecondaryTouchPointer(event)) return;
+      if (isDrawingRef.current || currentStrokeRef.current) return;
+
+      const isPrimary = event.button === 0 || (typeof event.buttons === 'number' ? (event.buttons & 1) === 1 : true);
+      if (!isPrimary) return;
+
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const point = getNormalizedPoint(event, rect);
       if (!point) return;
       event.preventDefault();
+
+      clearRenderQueue();
+      activeStrokeRectRef.current = rect;
 
       const stroke = {
         id: generateId('stroke'),
@@ -53,24 +229,28 @@ const useCanvasDrawing = ({
 
       isDrawingRef.current = true;
       currentStrokeRef.current = stroke;
+      activeDrawingPointerIdRef.current = event.pointerId;
+      activeDrawingPointerTypeRef.current = event.pointerType;
 
-      ensureStrokeSet(currentPageId).add(stroke.id);
-      appendStroke(currentPageId, stroke);
+      queuedPointsRef.current.push(point);
+      scheduleQueuedStrokeRender();
 
-      if (canvasRef.current?.setPointerCapture) {
+      if (event.pointerType !== 'touch' && canvasRef.current?.setPointerCapture) {
         canvasRef.current.setPointerCapture(event.pointerId);
       }
     },
     [
-      appendStroke,
+      activeDrawingPointerIdRef,
+      activeDrawingPointerTypeRef,
       canvasRef,
-      currentPageId,
+      clearRenderQueue,
       currentStrokeRef,
-      ensureStrokeSet,
       getNormalizedPoint,
       inkColor,
       inkWidth,
+      isSecondaryTouchPointer,
       isDrawingRef,
+      scheduleQueuedStrokeRender,
       tool,
     ],
   );
@@ -78,48 +258,99 @@ const useCanvasDrawing = ({
   const extendStroke = useCallback(
     (event) => {
       if (tool !== PENTOOL.DRAWING || !isDrawingRef.current || !currentStrokeRef.current) return;
-      const point = getNormalizedPoint(event);
-      if (!point) return;
+
+      if (event.pointerType === 'touch' && isMultiTouchGestureRef.current) {
+        if (activeDrawingPointerTypeRef.current === 'touch') {
+          abortStroke(event);
+        }
+        return;
+      }
+
+      if (isSecondaryTouchPointer(event)) return;
+      if (activeDrawingPointerIdRef.current !== null && event.pointerId !== activeDrawingPointerIdRef.current) return;
       event.preventDefault();
 
-      currentStrokeRef.current.points.push(point);
-      replaceLatestStroke(currentPageId, { ...currentStrokeRef.current });
+      queuePointsFromEvent(event, activeStrokeRectRef.current);
     },
-    [currentPageId, currentStrokeRef, getNormalizedPoint, isDrawingRef, replaceLatestStroke, tool],
+    [
+      abortStroke,
+      activeDrawingPointerIdRef,
+      activeDrawingPointerTypeRef,
+      currentStrokeRef,
+      isDrawingRef,
+      isSecondaryTouchPointer,
+      queuePointsFromEvent,
+      tool,
+    ],
   );
 
   const finishStroke = useCallback(
     (event) => {
       if (tool !== PENTOOL.DRAWING || !isDrawingRef.current || !currentStrokeRef.current) return;
-      if (event?.preventDefault) event.preventDefault();
-      const strokeToSend = currentStrokeRef.current;
 
-      const endPoint = event ? getNormalizedPoint(event) : null;
-      if (endPoint) {
-        strokeToSend.points.push(endPoint);
-        replaceLatestStroke(currentPageId, { ...strokeToSend });
+      if (event?.pointerType === 'touch' && isMultiTouchGestureRef.current && activeDrawingPointerTypeRef.current === 'touch') {
+        abortStroke(event);
+        return;
+      }
+
+      if (isSecondaryTouchPointer(event)) return;
+
+      const activePointerId = activeDrawingPointerIdRef.current;
+      if (event?.pointerId !== undefined && activePointerId !== null && event.pointerId !== activePointerId) return;
+
+      if (event?.preventDefault) event.preventDefault();
+
+      if (event) {
+        queuePointsFromEvent(event, activeStrokeRectRef.current);
+      }
+
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+
+      flushQueuedStrokeSegments();
+
+      const strokeToSend = {
+        ...currentStrokeRef.current,
+        points: [...currentStrokeRef.current.points],
+      };
+
+      if (strokeToSend.points.length > 0) {
+        ensureStrokeSet(currentPageId).add(strokeToSend.id);
+        appendStroke(currentPageId, strokeToSend);
+        sendMessage({ type: 'stroke:add', pageId: currentPageId, data: strokeToSend });
       }
 
       isDrawingRef.current = false;
       currentStrokeRef.current = null;
+      activeDrawingPointerIdRef.current = null;
+      activeDrawingPointerTypeRef.current = null;
+      clearRenderQueue();
 
-      if (canvasRef.current?.releasePointerCapture) {
+      const pointerIdToRelease = event?.pointerId ?? activePointerId;
+      if (canvasRef.current?.releasePointerCapture && pointerIdToRelease !== undefined && pointerIdToRelease !== null) {
         try {
-          canvasRef.current.releasePointerCapture(event.pointerId);
+          canvasRef.current.releasePointerCapture(pointerIdToRelease);
         } catch (_) {
-          // ignore release errors 
+          // ignore release errors
         }
       }
-
-      sendMessage({ type: 'stroke:add', pageId: currentPageId, data: strokeToSend });
     },
     [
+      activeDrawingPointerIdRef,
+      activeDrawingPointerTypeRef,
+      appendStroke,
+      abortStroke,
       canvasRef,
+      clearRenderQueue,
       currentPageId,
       currentStrokeRef,
-      getNormalizedPoint,
+      ensureStrokeSet,
+      flushQueuedStrokeSegments,
       isDrawingRef,
-      replaceLatestStroke,
+      isSecondaryTouchPointer,
+      queuePointsFromEvent,
       sendMessage,
       tool,
     ],
@@ -169,13 +400,45 @@ const useCanvasDrawing = ({
   );
 
   const clearCanvas = useCallback(() => {
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    isDrawingRef.current = false;
+    currentStrokeRef.current = null;
+    activeDrawingPointerIdRef.current = null;
+    activeDrawingPointerTypeRef.current = null;
+    activeTouchPointersRef.current.clear();
+    isMultiTouchGestureRef.current = false;
+    clearRenderQueue();
+
     ensureStrokeSet(currentPageId).clear();
     clearPageStrokes(currentPageId);
     sendMessage({ type: 'canvas:clear', pageId: currentPageId });
-  }, [clearPageStrokes, currentPageId, ensureStrokeSet, sendMessage]);
+  }, [
+    activeDrawingPointerIdRef,
+    activeDrawingPointerTypeRef,
+    clearPageStrokes,
+    clearRenderQueue,
+    currentPageId,
+    currentStrokeRef,
+    ensureStrokeSet,
+    isDrawingRef,
+    sendMessage,
+  ]);
 
   const handlePointerDown = useCallback(
     (event) => {
+      const shouldUseMultiTouchGesture = registerTouchPointerDown(event);
+      if (shouldUseMultiTouchGesture) {
+        if (activeDrawingPointerTypeRef.current === 'touch') {
+          abortStroke(event);
+        }
+        return;
+      }
+
+      if (isSecondaryTouchPointer(event)) return;
+
       if (tool === PENTOOL.ERASE) {
         const isLeft = typeof event.buttons === 'number' ? (event.buttons & 1) === 1 : event.button === 0;
         if (!isLeft) return;
@@ -185,11 +448,20 @@ const useCanvasDrawing = ({
         startStroke(event);
       }
     },
-    [eraseStrokeAtPoint, startStroke, tool],
+    [abortStroke, activeDrawingPointerTypeRef, eraseStrokeAtPoint, isSecondaryTouchPointer, registerTouchPointerDown, startStroke, tool],
   );
 
   const handlePointerMove = useCallback(
     (event) => {
+      if (event.pointerType === 'touch' && isMultiTouchGestureRef.current) {
+        if (activeDrawingPointerTypeRef.current === 'touch') {
+          abortStroke(event);
+        }
+        return;
+      }
+
+      if (isSecondaryTouchPointer(event)) return;
+
       if (tool === PENTOOL.ERASE) {
         const isLeft = typeof event.buttons === 'number' ? (event.buttons & 1) === 1 : event.button === 0;
         if (!isLeft) return;
@@ -199,11 +471,23 @@ const useCanvasDrawing = ({
         extendStroke(event);
       }
     },
-    [eraseStrokeAtPoint, extendStroke, tool],
+    [abortStroke, activeDrawingPointerTypeRef, eraseStrokeAtPoint, extendStroke, isSecondaryTouchPointer, tool],
   );
 
   const handlePointerUp = useCallback(
     (event) => {
+      const wasMultiTouchGesture = event.pointerType === 'touch' && isMultiTouchGestureRef.current;
+      releaseTouchPointer(event);
+
+      if (wasMultiTouchGesture) {
+        if (activeDrawingPointerTypeRef.current === 'touch') {
+          abortStroke(event);
+        }
+        return;
+      }
+
+      if (isSecondaryTouchPointer(event)) return;
+
       if (tool === PENTOOL.ERASE) {
         const isLeft = event.button === 0 || (typeof event.buttons === 'number' ? (event.buttons & 1) === 1 : false);
         if (!isLeft) return;
@@ -213,17 +497,43 @@ const useCanvasDrawing = ({
         finishStroke(event);
       }
     },
-    [eraseStrokeAtPoint, finishStroke, tool],
+    [abortStroke, activeDrawingPointerTypeRef, eraseStrokeAtPoint, finishStroke, isSecondaryTouchPointer, releaseTouchPointer, tool],
   );
 
   const handlePointerLeave = useCallback(
     (event) => {
-      // if the pointer leaves mid-draw, close the stroke to avoid dangling state.
       if (tool !== PENTOOL.ERASE) {
+        if (event.pointerType === 'touch' && isMultiTouchGestureRef.current && activeDrawingPointerTypeRef.current === 'touch') {
+          abortStroke(event);
+          return;
+        }
         finishStroke(event);
       }
     },
-    [finishStroke, tool],
+    [abortStroke, activeDrawingPointerTypeRef, finishStroke, tool],
+  );
+
+  const handlePointerCancel = useCallback(
+    (event) => {
+      const wasMultiTouchGesture = event.pointerType === 'touch' && isMultiTouchGestureRef.current;
+      releaseTouchPointer(event);
+
+      if (wasMultiTouchGesture) {
+        if (activeDrawingPointerTypeRef.current === 'touch') {
+          abortStroke(event);
+        }
+        return;
+      }
+
+      if (tool !== PENTOOL.ERASE) {
+        if (event.pointerType === 'touch' && isMultiTouchGestureRef.current && activeDrawingPointerTypeRef.current === 'touch') {
+          abortStroke(event);
+          return;
+        }
+        finishStroke(event);
+      }
+    },
+    [abortStroke, activeDrawingPointerTypeRef, finishStroke, releaseTouchPointer, tool],
   );
 
   return {
@@ -231,6 +541,7 @@ const useCanvasDrawing = ({
     handlePointerMove,
     handlePointerUp,
     handlePointerLeave,
+    handlePointerCancel,
     clearCanvas,
   };
 };
