@@ -41,7 +41,7 @@ Open the app in two tabs; type or draw and see changes sync. Use the toolbar to 
 
 - `init { data: { pages: [{ id, text, strokes }] } }`
 - `page:add { data: { id, text, strokes } }`
-- `text:update | update { pageId, data: string }`
+- `text:update { pageId, data: string }`
 - `stroke:add { pageId, data: { id, points[{x,y}], color, width } }`
 - `stroke:remove { pageId, strokeId }`
 - `canvas:clear { pageId }`

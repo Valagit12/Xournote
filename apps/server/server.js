@@ -53,7 +53,7 @@ const sendTo = (ws, payload) => {
     ws.send(JSON.stringify(payload));
 };
 
-const broadcast = (notebookId, payload) => {
+const broadcast = (notebookId, payload, excludedClient = null) => {
     const parsed = parseOutgoingMessage(payload);
     if (!parsed.success) {
         console.warn('Dropping outbound broadcast: invalid shape', parsed.error.format());
@@ -61,6 +61,7 @@ const broadcast = (notebookId, payload) => {
     }
     const data = JSON.stringify(parsed.data);
     wss.clients.forEach((client) => {
+        if (client === excludedClient) return;
         if (client.readyState === WebSocket.OPEN && client.notebookId === notebookId) {
             client.send(data);
         }
@@ -126,13 +127,11 @@ wss.on('connection', (ws, req) => {
                     broadcast(ws.notebookId, { type: 'page:add', data: newPage });
                     break;
                 }
-                case 'text:update':
-                case 'update': {
+                case 'text:update': {
                     const page = getPage(notebook, parsed.pageId);
                     if (!page) break;
                     page.text = parsed.data;
-                    broadcast(ws.notebookId, { type: 'text:update', pageId: page.id, data: page.text });
-                    broadcast(ws.notebookId, { type: 'update', pageId: page.id, data: page.text });
+                    broadcast(ws.notebookId, { type: 'text:update', pageId: page.id, data: page.text }, ws);
                     break;
                 }
                 case 'stroke:add': {

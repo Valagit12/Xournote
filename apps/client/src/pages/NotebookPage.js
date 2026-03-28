@@ -127,7 +127,6 @@ const NotebookPage = () => {
 
     const handle = setTimeout(() => {
       sendMessage({ type: 'text:update', pageId: currentPageId, data: currentPage.text || '' });
-      sendMessage({ type: 'update', pageId: currentPageId, data: currentPage.text || '' });
     }, TEXT_UPDATE_DEBOUNCE_MS);
 
     return () => clearTimeout(handle);

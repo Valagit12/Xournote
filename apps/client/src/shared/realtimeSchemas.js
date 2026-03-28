@@ -32,7 +32,6 @@ const messageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('init'), data: initDataSchema }),
   z.object({ type: z.literal('page:add'), data: pageSchema.optional() }),
   z.object({ type: z.literal('text:update'), pageId: z.string().optional(), data: z.string() }),
-  z.object({ type: z.literal('update'), pageId: z.string().optional(), data: z.string() }),
   z.object({ type: z.literal('stroke:add'), pageId: z.string().optional(), data: strokeSchema }),
   z.object({
     type: z.literal('stroke:remove'),

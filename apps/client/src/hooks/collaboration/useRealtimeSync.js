@@ -133,8 +133,7 @@ const useRealtimeSync = ({
               handlers.onPageAdd?.(page);
               break;
             }
-            case 'text:update':
-            case 'update': {
+            case 'text:update': {
               if (typeof message.data !== 'string') break;
               handlers.onTextUpdate?.(activePageId, message.data);
               break;
